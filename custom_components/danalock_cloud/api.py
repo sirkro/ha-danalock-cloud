@@ -69,7 +69,7 @@ class DanalockApiClient:
         self,
         hass: HomeAssistant,
         username: str,
-        password: Optional[str] = None, # Only used for initial auth if passed
+        password: Optional[str] = None, # Used temporarily for initial auth
         access_token: Optional[str] = None,
         refresh_token: Optional[str] = None,
         token_expires_at: Optional[float] = None,
@@ -77,12 +77,12 @@ class DanalockApiClient:
         """Initialize the API client."""
         self._hass = hass
         self._username = username
-        self._password = password # Store temporarily if provided for initial auth
+        self._password = password
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._token_expires_at = token_expires_at or 0.0
         self._session = async_get_clientsession(hass)
-        self._lock = asyncio.Lock() # Lock for token refresh
+        self._lock = asyncio.Lock() # Lock for token refresh operations
 
     async def _request(
         self,
@@ -94,13 +94,13 @@ class DanalockApiClient:
         expect_json: bool = True,
         use_auth: bool = True,
     ) -> Any:
-        """Make an API request."""
+        """Make an API request, handling authentication and errors."""
         if use_auth:
             await self._ensure_token_valid()
             req_headers = headers.copy() if headers else {}
-            # Ensure token is still valid after potential refresh before adding header
             if not self._access_token:
-                 raise DanalockApiAuthError("Access token became invalid during request preparation.")
+                 _LOGGER.error("Access token became invalid during request preparation for %s.", url)
+                 raise ConfigEntryAuthFailed("Access token missing after validation check.")
             req_headers["Authorization"] = f"Bearer {self._access_token}"
         else:
             req_headers = headers
@@ -117,34 +117,31 @@ class DanalockApiClient:
                 timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT),
             ) as response:
                 _LOGGER.debug("Response Status: %s", response.status)
-                # _LOGGER.debug("Response Headers: %s", response.headers) # Can be verbose
 
                 if response.status == 401 and use_auth:
-                     _LOGGER.warning("Authentication failed (401). Token might be invalid.")
-                     # Clear potentially invalid token and raise specific error
+                     _LOGGER.warning("Authentication failed (401). Token might be invalid or expired.")
                      async with self._lock:
                          self._access_token = None
                          self._refresh_token = None
                          self._token_expires_at = 0.0
-                     raise DanalockApiAuthError("Authentication failed (401)")
+                     raise ConfigEntryAuthFailed("Authentication failed (401)")
 
                 if not (200 <= response.status < 300):
-                    try:
-                        error_text = await response.text()
-                        _LOGGER.error("API Error %s for %s %s: %s", response.status, method, url, error_text)
-                    except Exception:
-                        error_text = "Failed to get error details"
-                        _LOGGER.error("API Error %s for %s %s: %s", response.status, method, url, error_text)
+                    error_text = await response.text()
+                    _LOGGER.error("API Error %s for %s %s: %s", response.status, method, url, error_text)
+                    if response.status == 401: # Ensure 401 raises auth error even if use_auth was false (e.g. during token request)
+                         raise ConfigEntryAuthFailed(f"API request failed: {response.status} - {error_text}")
                     raise DanalockApiError(f"API request failed: {response.status} - {error_text}")
 
                 if expect_json:
                     try:
-                        resp_json = await response.json(content_type=None) # Allow any content type for json parsing
+                        # Allow any content type as Danalock API might not always set it correctly
+                        resp_json = await response.json(content_type=None)
                         _LOGGER.debug("Response JSON: %s", resp_json)
                         return resp_json
-                    except ValueError as json_err: # Catch JSON decode errors
+                    except ValueError as json_err:
                         resp_text_err = await response.text()
-                        _LOGGER.error("API response was not valid JSON, though expected. Content: %s. Error: %s", resp_text_err, json_err)
+                        _LOGGER.error("API response was not valid JSON. Content: %s. Error: %s", resp_text_err, json_err)
                         raise DanalockApiError(f"Invalid JSON response from API: {json_err}")
                     except Exception as e:
                          _LOGGER.error("Error parsing JSON response: %s", e)
@@ -160,8 +157,10 @@ class DanalockApiClient:
         except asyncio.TimeoutError:
             _LOGGER.error("Request timed out after %s seconds for URL %s", DEFAULT_TIMEOUT, url)
             raise DanalockApiClientError("Request timed out") from TimeoutError
-        except DanalockApiAuthError: # Re-raise auth errors
+        except ConfigEntryAuthFailed: # Re-raise auth errors to ensure HA handles them
              raise
+        except DanalockApiAuthError as e: # Catch internal auth errors too
+             raise ConfigEntryAuthFailed("Authentication required") from e
         except Exception as e:
             _LOGGER.exception("An unexpected error occurred during API request to %s", url)
             raise DanalockApiClientError(f"Unexpected error during request: {e}") from e
@@ -170,59 +169,36 @@ class DanalockApiClient:
     async def _ensure_token_valid(self) -> None:
         """Ensure the access token is valid, refreshing if necessary."""
         async with self._lock:
-            needs_refresh = False
             current_time = time()
+            if self._access_token and self._token_expires_at and self._token_expires_at >= (current_time + 60):
+                # Token exists and is not expiring soon
+                return
 
-            if not self._access_token:
-                _LOGGER.debug("Access token is missing.")
-                needs_refresh = True
-            elif self._token_expires_at and self._token_expires_at < (current_time + 60):
-                 _LOGGER.debug("Access token expired or nearing expiry (expires at %s).", self._token_expires_at)
-                 needs_refresh = True
+            _LOGGER.debug("Access token missing or expired/expiring soon. Attempting refresh.")
 
-            if needs_refresh:
-                _LOGGER.debug("Attempting token refresh or re-authentication.")
-                refreshed = False
-                if self._refresh_token:
-                    try:
-                        await self._refresh_access_token()
-                        refreshed = True # Mark as refreshed successfully
-                    except DanalockApiAuthError as auth_err:
-                         _LOGGER.warning("Refresh token failed (%s). Attempting full re-authentication.", auth_err)
-                         # Fall through to password auth if possible
-                    except Exception as e:
-                         _LOGGER.error("Unexpected error during token refresh: %s", e)
-                         # Don't try password auth if refresh had unexpected error
-                         raise DanalockApiAuthError("Failed to refresh token") from e
-                else:
-                     _LOGGER.debug("No refresh token available.")
+            if not self._refresh_token:
+                 _LOGGER.error("Token needs refresh, but no refresh token available.")
+                 raise ConfigEntryAuthFailed("Authentication required, no refresh token available.")
 
-                # Attempt password auth if refresh failed or wasn't possible, and password exists
-                if not refreshed:
-                    if self._password:
-                        _LOGGER.info("Attempting full authentication using stored password.")
-                        try:
-                            await self.authenticate(self._username, self._password)
-                            # Clear password after successful re-auth if desired (more secure)
-                            # self._password = None
-                        except DanalockApiAuthError as e:
-                             _LOGGER.error("Full re-authentication failed: %s", e)
-                             raise # Re-raise auth error
-                        except Exception as e:
-                            _LOGGER.error("Unexpected error during full re-authentication: %s", e)
-                            raise DanalockApiAuthError("Full re-authentication failed unexpectedly") from e
-                    else:
-                        _LOGGER.error("Token needs refresh/auth, but no refresh token or password available.")
-                        raise ConfigEntryAuthFailed("Authentication required, but no credentials available.")
-
-            # Final check: Do we have a token now?
-            if not self._access_token:
-                 _LOGGER.error("No valid access token available after refresh/auth attempt.")
-                 raise DanalockApiAuthError("Missing access token after refresh/auth attempt")
+            try:
+                await self._refresh_access_token()
+                if not self._access_token:
+                     _LOGGER.error("Token refresh attempt succeeded but access token is still missing.")
+                     raise ConfigEntryAuthFailed("Token refresh failed unexpectedly (missing token post-refresh).")
+                _LOGGER.debug("Token refresh successful.")
+            except (DanalockApiAuthError, ConfigEntryAuthFailed) as auth_err:
+                 _LOGGER.warning("Refresh token failed (%s). Raising ConfigEntryAuthFailed to trigger reauth.", auth_err)
+                 self._access_token = None
+                 self._refresh_token = None
+                 self._token_expires_at = 0.0
+                 raise ConfigEntryAuthFailed("Refresh token is invalid or expired.") from auth_err
+            except Exception as e:
+                 _LOGGER.error("Unexpected error during token refresh: %s", e, exc_info=True)
+                 raise ConfigEntryAuthFailed("Failed to refresh token due to an unexpected error.") from e
 
 
     async def authenticate(self, username: str, password: str) -> Dict[str, Any]:
-        """Authenticate with username and password to get tokens."""
+        """Authenticate with username/password to get new tokens."""
         _LOGGER.info("Authenticating user %s", username)
         data = {
             "grant_type": "password",
@@ -243,30 +219,29 @@ class DanalockApiClient:
             self._access_token = response[ACCESS_TOKEN]
             self._refresh_token = response[REFRESH_TOKEN]
             self._token_expires_at = time() + response[EXPIRES_IN]
-            self._username = username # Store username in case needed later
-            # Store password temporarily if passed, might be cleared after use
-            self._password = password
+            self._username = username
+            # Do not store password in the client instance long-term
             _LOGGER.info("Authentication successful.")
             return {
                 ACCESS_TOKEN: self._access_token,
                 REFRESH_TOKEN: self._refresh_token,
-                EXPIRES_IN: response[EXPIRES_IN], # Return original expires_in for storage
-                TOKEN_EXPIRES_AT: self._token_expires_at, # Return calculated expiry time
+                EXPIRES_IN: response[EXPIRES_IN],
+                TOKEN_EXPIRES_AT: self._token_expires_at,
             }
-        except DanalockApiError as e:
+        except (DanalockApiError, DanalockApiClientError, ConfigEntryAuthFailed) as e:
             _LOGGER.error("Authentication failed: %s", e)
-            # Check for specific invalid credential messages if API provides them
             err_str = str(e).lower()
-            if "invalid_grant" in err_str or "invalid credentials" in err_str or "unauthorized" in err_str:
+            if "invalid_grant" in err_str or "invalid credentials" in err_str or "unauthorized" in err_str or "401" in err_str:
                  raise DanalockApiAuthError("Invalid username or password") from e
-            raise DanalockApiAuthError(f"Authentication failed: {e}") from e
+            raise DanalockApiAuthError(f"Authentication failed due to API error: {e}") from e
 
 
     async def _refresh_access_token(self) -> None:
         """Refresh the access token using the refresh token."""
         _LOGGER.info("Refreshing access token for user %s", self._username)
         if not self._refresh_token:
-            _LOGGER.error("Cannot refresh token: No refresh token available.")
+            # This case should ideally be caught by _ensure_token_valid before calling this
+            _LOGGER.error("Internal error: _refresh_access_token called without a refresh token.")
             raise DanalockApiAuthError("Missing refresh token")
 
         data = {
@@ -285,16 +260,14 @@ class DanalockApiClient:
                  raise DanalockApiAuthError("Invalid token refresh response format")
 
             self._access_token = response[ACCESS_TOKEN]
-            # Sometimes refresh might return a new refresh token
-            self._refresh_token = response.get(REFRESH_TOKEN, self._refresh_token)
+            self._refresh_token = response.get(REFRESH_TOKEN, self._refresh_token) # Update if a new one is provided
             self._token_expires_at = time() + response[EXPIRES_IN]
             _LOGGER.info("Access token refreshed successfully. New expiry: %s", self._token_expires_at)
-        except DanalockApiError as e:
+        except (DanalockApiError, DanalockApiClientError, ConfigEntryAuthFailed) as e:
             _LOGGER.error("Failed to refresh access token: %s", e)
-            # If refresh token is invalid, we need full re-auth
-            if "invalid_grant" in str(e).lower():
+            if "invalid_grant" in str(e).lower() or "401" in str(e):
                  raise DanalockApiAuthError("Invalid refresh token") from e
-            raise DanalockApiAuthError(f"Token refresh failed: {e}") from e
+            raise DanalockApiAuthError(f"Token refresh failed due to API error: {e}") from e
 
 
     async def get_locks(self) -> List[Dict[str, Any]]:
@@ -310,7 +283,6 @@ class DanalockApiClient:
         if isinstance(response, list):
             for lock_data in response:
                 try:
-                    # Defensive access to nested dictionary keys
                     afi_data = lock_data.get("afi") if isinstance(lock_data, dict) else None
                     serial = afi_data.get("serial_number") if isinstance(afi_data, dict) else None
                     name = lock_data.get("name") if isinstance(lock_data, dict) else None
@@ -319,13 +291,13 @@ class DanalockApiClient:
                         locks.append({LOCK_SERIAL: serial, LOCK_NAME: name})
                     else:
                         _LOGGER.warning("Found lock entry with missing serial or name: %s", lock_data)
-                except Exception as e: # Catch any unexpected error during processing
+                except Exception as e:
                      _LOGGER.warning("Error processing lock data entry %s: %s", lock_data, e, exc_info=True)
         else:
              _LOGGER.error("Unexpected format for locks response (expected list): %s", response)
              raise DanalockApiError("Invalid format received for locks list")
 
-        _LOGGER.info("Found %d locks: %s", len(locks), [l[LOCK_NAME] for l in locks])
+        _LOGGER.info("Found %d locks: %s", len(locks), [l.get(LOCK_NAME, 'Unknown') for l in locks])
         return locks
 
 
@@ -336,7 +308,6 @@ class DanalockApiClient:
         arguments: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """Execute a command via the bridge and poll for its result."""
-        # Enhanced logging
         _LOGGER.info("Executing operation '%s' with args %s for lock %s",
                      operation, arguments, serial_number)
         payload = {
@@ -366,7 +337,10 @@ class DanalockApiClient:
                 raise DanalockJobError("Failed to get job ID from execute response")
             _LOGGER.debug("Job ID %s received for operation %s", job_id, operation)
 
-        except (DanalockApiAuthError, DanalockApiError, DanalockApiClientError) as e:
+        except (ConfigEntryAuthFailed, DanalockApiAuthError): # Propagate auth errors
+            _LOGGER.error("Authentication error during execute step for %s on %s", operation, serial_number)
+            raise
+        except (DanalockApiError, DanalockApiClientError) as e:
             _LOGGER.error("Failed to execute command %s for %s: %s", operation, serial_number, e)
             raise DanalockJobError(f"Failed to execute command {operation}") from e
         except Exception as e:
@@ -382,7 +356,6 @@ class DanalockApiClient:
             poll_count += 1
             _LOGGER.debug("Polling job %s for %s (Attempt %d)", job_id, operation, poll_count)
 
-            # Add delay *before* polling (except first poll implicitly handled by loop start)
             if poll_count > 1:
                 await asyncio.sleep(JOB_POLL_INTERVAL)
 
@@ -392,37 +365,40 @@ class DanalockApiClient:
 
                 if not isinstance(poll_response, dict):
                     _LOGGER.warning("Poll response for job %s was not a dictionary: %s", job_id, poll_response)
-                    # Decide how to handle: continue polling or fail? Let's continue for now.
-                    continue
+                    continue # Continue polling, maybe a temporary issue
 
                 status = poll_response.get("status")
                 result = poll_response.get("result", {})
-                last_status = status # Keep track of the last seen status
+                last_status = status
 
                 _LOGGER.debug("Poll response for job %s: Status=%s, Result=%s", job_id, status, result)
 
                 if status == JOB_STATUS_SUCCEEDED:
                     _LOGGER.info("Job %s for %s succeeded", job_id, operation)
-                    return result if isinstance(result, dict) else {} # Return result, ensure it's a dict
+                    return result if isinstance(result, dict) else {}
                 elif status == JOB_STATUS_FAILED:
-                    error_text = result.get("afi_status_text") or result.get("dmi_status_text") or "Unknown failure reason"
-                    _LOGGER.error("Job %s for %s failed: %s (Result: %s)", job_id, operation, error_text, result)
-                    raise DanalockJobError(f"Operation {operation} failed: {error_text}")
+                    error_detail = "Unknown failure reason"
+                    if isinstance(result, dict):
+                        # Prioritize more specific error texts if available
+                        error_detail = result.get("bridge_server_status_text") \
+                                    or result.get("afi_status_text") \
+                                    or result.get("dmi_status_text") \
+                                    or str(result) # Fallback to full result string representation
+                    _LOGGER.error("Job %s for %s failed: %s (Full Result: %s)", job_id, operation, error_detail, result)
+                    raise DanalockJobError(f"Operation {operation} failed: {error_detail}")
                 elif status == JOB_STATUS_IN_PROGRESS:
                     _LOGGER.debug("Job %s for %s still in progress...", job_id, operation)
-                    continue # Continue polling
+                    continue
                 else:
                     _LOGGER.warning("Job %s for %s returned unexpected status: %s (Response: %s)", job_id, operation, status, poll_response)
-                    # Treat unexpected status as failure? Let's raise immediately.
                     raise DanalockJobError(f"Operation {operation} returned unexpected status: {status}")
 
-            except DanalockApiAuthError as e:
+            except (ConfigEntryAuthFailed, DanalockApiAuthError) as e:
                  _LOGGER.error("Authentication error during polling job %s: %s", job_id, e)
-                 raise # Re-raise auth errors immediately
+                 raise
             except (DanalockApiError, DanalockApiClientError) as e:
                 _LOGGER.error("Polling job %s failed: %s", job_id, e)
-                # Don't immediately fail the whole operation on a single poll error, maybe retry?
-                # For simplicity now, let's fail it. Could add retry logic here later.
+                # Fail the operation if a poll request errors out
                 raise DanalockJobError(f"Polling failed for operation {operation}") from e
             except Exception as e:
                 _LOGGER.exception("Unexpected error during polling job %s", job_id)
@@ -436,51 +412,48 @@ class DanalockApiClient:
 
     async def get_lock_state(self, serial_number: str) -> Optional[str]:
         """Get the current state (Locked/Unlocked) of a lock."""
-        _LOGGER.debug("Attempting to get lock state for %s", serial_number) # Added debug log
+        _LOGGER.debug("Attempting to get lock state for %s", serial_number)
         try:
             result = await self._execute_and_poll(serial_number, OP_GET_STATE)
             state = result.get("state") if isinstance(result, dict) else None
-            _LOGGER.debug("Received state '%s' for lock %s", state, serial_number) # Added debug log
-            if state == API_STATE_LOCKED or state == API_STATE_UNLOCKED:
+            _LOGGER.debug("Received state '%s' for lock %s", state, serial_number)
+            if state in (API_STATE_LOCKED, API_STATE_UNLOCKED):
                  return state
             else:
                  _LOGGER.warning("Received unexpected state '%s' for lock %s", state, serial_number)
-                 return None # Or raise an error? Returning None indicates unknown state.
+                 return None # Indicate unknown state
         except DanalockJobError as e:
             _LOGGER.error("Failed to get state for lock %s: %s", serial_number, e)
-            return None # Indicate state couldn't be retrieved
-        except Exception as e: # Catch any other unexpected error
+            return None
+        except Exception as e:
             _LOGGER.exception("Unexpected error getting lock state for %s", serial_number)
             return None
 
     async def get_battery_level(self, serial_number: str) -> Optional[int]:
         """Get the current battery level of a lock."""
-        _LOGGER.debug("Attempting to get battery level for %s", serial_number) # Added debug log
+        _LOGGER.debug("Attempting to get battery level for %s", serial_number)
         try:
             result = await self._execute_and_poll(serial_number, OP_GET_BATTERY)
             battery = result.get("battery_level") if isinstance(result, dict) else None
-            _LOGGER.debug("Received battery level '%s' for lock %s", battery, serial_number) # Added debug log
+            _LOGGER.debug("Received battery level '%s' for lock %s", battery, serial_number)
             if isinstance(battery, int) and 0 <= battery <= 100:
                 return battery
             else:
-                 # Allow 0 as a valid level
-                 if battery == 0:
+                 if battery == 0: # Allow 0%
                      return 0
                  _LOGGER.warning("Received invalid battery level '%s' (type: %s) for lock %s", battery, type(battery).__name__, serial_number)
                  return None
         except DanalockJobError as e:
             _LOGGER.error("Failed to get battery level for lock %s: %s", serial_number, e)
             return None
-        except Exception as e: # Catch any other unexpected error
+        except Exception as e:
             _LOGGER.exception("Unexpected error getting battery level for %s", serial_number)
             return None
 
     async def lock(self, serial_number: str) -> bool:
         """Send lock command."""
-        # Enhanced logging
         _LOGGER.info("Starting lock operation for %s", serial_number)
         try:
-            # Explicitly log the exact payload being sent
             _LOGGER.debug("Lock payload: operation=%s, arguments=%s", OP_LOCK, [ARG_LOCK])
             result = await self._execute_and_poll(serial_number, OP_LOCK, arguments=[ARG_LOCK])
             _LOGGER.info("Lock command successful for %s with result: %s", serial_number, result)
@@ -494,10 +467,8 @@ class DanalockApiClient:
 
     async def unlock(self, serial_number: str) -> bool:
         """Send unlock command."""
-        # Enhanced logging
         _LOGGER.info("Starting unlock operation for %s", serial_number)
         try:
-            # Explicitly log the exact payload being sent
             _LOGGER.debug("Unlock payload: operation=%s, arguments=%s", OP_UNLOCK, [ARG_UNLOCK])
             result = await self._execute_and_poll(serial_number, OP_UNLOCK, arguments=[ARG_UNLOCK])
             _LOGGER.info("Unlock command successful for %s with result: %s", serial_number, result)
@@ -510,29 +481,35 @@ class DanalockApiClient:
             return False
 
     async def get_lock_data(self, serial_number: str) -> Dict[str, Any]:
-        """Fetch both state and battery level for a lock, handling partial failures."""
+        """Fetch both state and battery level for a lock concurrently."""
         _LOGGER.debug("Fetching concurrent data for lock %s", serial_number)
 
         async def _safe_get_state(serial):
             try:
                 return await self.get_lock_state(serial)
-            except Exception as e: # Catch broadly here, specific errors logged deeper
+            except ConfigEntryAuthFailed:
+                raise # Propagate auth errors immediately
+            except Exception as e:
                 _LOGGER.warning("Failed to get state during concurrent fetch for %s: %s", serial, e)
                 return None
 
         async def _safe_get_battery(serial):
             try:
                 return await self.get_battery_level(serial)
+            except ConfigEntryAuthFailed:
+                raise # Propagate auth errors immediately
             except Exception as e:
                 _LOGGER.warning("Failed to get battery during concurrent fetch for %s: %s", serial, e)
                 return None
 
-        # Run concurrently
         state_task = asyncio.create_task(_safe_get_state(serial_number))
         battery_task = asyncio.create_task(_safe_get_battery(serial_number))
 
-        # Wait for both tasks to complete
-        state, battery = await asyncio.gather(state_task, battery_task)
+        try:
+            state, battery = await asyncio.gather(state_task, battery_task)
+        except ConfigEntryAuthFailed:
+            _LOGGER.error("Authentication failure during concurrent data fetch for %s", serial_number)
+            raise # Re-raise auth error to be handled by coordinator
 
         return {
             LOCK_STATE: state,
