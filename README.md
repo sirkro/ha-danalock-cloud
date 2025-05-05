@@ -8,7 +8,7 @@ This is a custom integration for Home Assistant to control [Danalock V3](https:/
 
 ## Acknowledgements
 
-This integration was inspired by and utilizes understanding of the Danalock API derived from the work done by **[@adisve](https://github.com/adisve)** on the [unofficial Danalock Node-RED flow](https://github.com/adisve/node-red-contrib-danalock). Many thanks for figuring out the API interactions!
+This integration was inspired by and utilizes understanding of the Danalock API derived from the work done by **[@erikwihlborg76](https://github.com/erikwihlborg76)** on the [unofficial Danalock Node-RED flow](https://github.com/erikwihlborg76/unofficial-danalock-web-api). Many thanks for figuring out the API interactions!
 
 ## Features
 
