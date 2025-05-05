@@ -1,7 +1,6 @@
-{
-    "name": "Danalock Cloud",
-    "domains": ["danalock_cloud"],
-    "render_readme": true,
-    "iot_class": "cloud_polling"
-  }
+            {
+              "name": "Danalock Cloud",
+              "render_readme": true
+            }
+
   
