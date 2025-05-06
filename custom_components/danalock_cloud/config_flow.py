@@ -1,3 +1,5 @@
+# custom_components/danalock_cloud/config_flow.py
+
 """Config flow for Danalock Cloud integration."""
 import logging
 from typing import Any, Dict, Optional
@@ -10,6 +12,10 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+# Import password storage constants if needed (optional, HA handles obfuscation)
+# from homeassistant.helpers.storage import Store
+# from homeassistant.helpers.typing import HomeAssistantType
+
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.schema_config_entry_flow import (
     SchemaFlowFormStep,
@@ -70,26 +76,30 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: Dict[str, str] = {}
 
         if user_input is not None:
-            username_lower = user_input[CONF_USERNAME].lower()
+            username = user_input[CONF_USERNAME]
+            password = user_input[CONF_PASSWORD] # Get password
+            username_lower = username.lower()
+
             await self.async_set_unique_id(username_lower)
             self._abort_if_unique_id_configured()
 
             auth_result = await self._test_credentials(
-                username=user_input[CONF_USERNAME],
-                password=user_input[CONF_PASSWORD],
+                username=username,
+                password=password, # Pass password
                 return_data=True
             )
 
             if isinstance(auth_result, dict) and ACCESS_TOKEN in auth_result:
                 # Successful authentication
                 entry_data = {
-                    CONF_USERNAME: user_input[CONF_USERNAME], # Store original case for display
+                    CONF_USERNAME: username,
+                    CONF_PASSWORD: password, # Store the password
                     ACCESS_TOKEN: auth_result[ACCESS_TOKEN],
                     REFRESH_TOKEN: auth_result[REFRESH_TOKEN],
                     TOKEN_EXPIRES_AT: auth_result[TOKEN_EXPIRES_AT],
                 }
                 return self.async_create_entry(
-                    title=user_input[CONF_USERNAME], data=entry_data
+                    title=username, data=entry_data
                 )
             else:
                 # Authentication failed, auth_result contains the errors dict
@@ -107,18 +117,19 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: Dict[str, str] = {}
 
         if user_input is not None and self.reauth_entry:
-            password = user_input[CONF_PASSWORD]
+            password = user_input[CONF_PASSWORD] # Get new password
             username = self.reauth_entry.data[CONF_USERNAME]
 
             auth_result = await self._test_credentials(
                 username=username,
-                password=password,
+                password=password, # Pass new password
                 return_data=True
             )
 
             if isinstance(auth_result, dict) and ACCESS_TOKEN in auth_result:
                 # Successful re-authentication
                 new_data = self.reauth_entry.data.copy()
+                new_data[CONF_PASSWORD] = password # Store the new password
                 new_data[ACCESS_TOKEN] = auth_result[ACCESS_TOKEN]
                 new_data[REFRESH_TOKEN] = auth_result[REFRESH_TOKEN]
                 new_data[TOKEN_EXPIRES_AT] = auth_result[TOKEN_EXPIRES_AT]
@@ -126,8 +137,8 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self.hass.config_entries.async_update_entry(
                     self.reauth_entry, data=new_data
                 )
-                # No need to reload here, HA does it after reauth flow finishes
-                # await self.hass.config_entries.async_reload(self.reauth_entry.entry_id)
+                # Reload the entry after successful reauth
+                await self.hass.config_entries.async_reload(self.reauth_entry.entry_id)
                 return self.async_abort(reason="reauth_successful")
             else:
                 # Re-authentication failed
@@ -146,9 +157,11 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, username: str, password: str, return_data: bool = False
     ) -> Dict[str, str] | Dict[str, Any]:
         """Test credentials against the API."""
-        api_client = DanalockApiClient(self.hass, username=username)
+        # Pass password to client constructor for testing
+        api_client = DanalockApiClient(self.hass, username=username, password=password)
         try:
             _LOGGER.debug("Attempting authentication for %s", username)
+            # Pass password explicitly here too, as the client instance is temporary
             auth_data = await api_client.authenticate(username, password)
             _LOGGER.debug("Authentication successful for %s", username)
             return auth_data if return_data else {}
@@ -168,4 +181,3 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> SchemaOptionsFlowHandler:
         """Get the options flow for this handler."""
         return SchemaOptionsFlowHandler(config_entry, OPTIONS_FLOW)
-
