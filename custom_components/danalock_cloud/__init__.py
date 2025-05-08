@@ -1,3 +1,5 @@
+# custom_components/danalock_cloud/__init__.py
+
 """The Danalock Cloud integration."""
 import asyncio
 import logging
@@ -54,7 +56,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     refresh_token = entry.data.get(REFRESH_TOKEN)
     token_expires_at = entry.data.get(TOKEN_EXPIRES_AT)
 
-    # --- Pass the entry object to the client ---
     api_client = DanalockApiClient(
         hass,
         entry=entry, # Pass the config entry itself
@@ -67,7 +68,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     try:
         _LOGGER.debug("[%s] Ensuring token validity or attempting initial auth.", entry.entry_id)
-        # This will now attempt self-healing and persist updated tokens if needed
         await api_client._ensure_token_valid()
 
         _LOGGER.debug("[%s] Fetching initial list of locks.", entry.entry_id)
@@ -77,13 +77,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     except ConfigEntryAuthFailed as err:
         _LOGGER.error("[%s] Authentication failed during setup: %s", entry.entry_id, err)
-        # No need to explicitly trigger reauth here, HA should do it based on the exception
         raise
     except (DanalockApiClientError, Exception) as err:
         _LOGGER.error("[%s] Failed to connect or get locks during setup: %s", entry.entry_id, err, exc_info=True)
         raise ConfigEntryNotReady(f"Failed to initialize Danalock API: {err}") from err
-
-    # Token persistence is now handled within the ApiClient after successful validation/refresh
 
     update_interval_minutes = entry.options.get(
         "update_interval", int(UPDATE_INTERVAL.total_seconds() / 60)
@@ -91,7 +88,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = DanalockDataUpdateCoordinator(
         hass,
-        config_entry=entry, # Pass entry to coordinator too
+        config_entry=entry,
         api_client=api_client,
         locks=locks or [],
         update_interval_minutes=update_interval_minutes,
@@ -114,8 +111,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(entry.add_update_listener(options_update_listener))
 
-    # --- Register Refresh Service ---
-    # (Service registration code remains the same)
     if not hass.services.has_service(DOMAIN, SERVICE_REFRESH_DEVICES):
         _LOGGER.info("Registering service: %s.%s", DOMAIN, SERVICE_REFRESH_DEVICES)
 
@@ -142,13 +137,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             handle_refresh_devices,
             schema=SERVICE_REFRESH_SCHEMA,
         )
-    # --- End Service Registration ---
-
 
     _LOGGER.info("[%s] Danalock Cloud setup complete for %s", entry.entry_id, entry.title)
     return True
-
-# async_unload_entry and options_update_listener remain the same
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
@@ -161,11 +152,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry_id, None)
         _LOGGER.info("Danalock Cloud entry %s data removed.", entry_id)
 
-        # --- Unregister Service ---
         if not any(e.domain == DOMAIN for e in hass.config_entries.async_loaded_entries(hass)):
              _LOGGER.info("Last Danalock Cloud entry unloaded, removing service %s.%s", DOMAIN, SERVICE_REFRESH_DEVICES)
              hass.services.async_remove(DOMAIN, SERVICE_REFRESH_DEVICES)
-        # --- End Service Unregistration ---
 
     _LOGGER.info("Danalock Cloud entry %s unloaded result: %s", entry_id, unload_ok)
     return unload_ok
@@ -205,3 +194,4 @@ async def options_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
     )
     coordinator.update_interval = new_interval
     _LOGGER.info("[%s] Successfully updated polling interval.", entry_id)
+
