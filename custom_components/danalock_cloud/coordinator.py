@@ -1,5 +1,6 @@
 # custom_components/danalock_cloud/coordinator.py
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
