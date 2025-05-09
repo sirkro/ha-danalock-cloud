@@ -1,5 +1,5 @@
 """Lock platform for Danalock Cloud."""
-import asyncio
+import asyncio # Ensure asyncio is imported
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -16,9 +16,8 @@ from .const import (
     API_STATE_UNLOCKED,
     COMMAND_UPDATE_DELAY,
     DOMAIN,
-    EVENT_LOCK_COMMAND_FAILURE,  # Import event constants
-    EVENT_LOCK_COMMAND_SUCCESS,  # Import event constants
-    LOCK_BATTERY,
+    EVENT_LOCK_COMMAND_FAILURE,
+    EVENT_LOCK_COMMAND_SUCCESS,
     LOCK_NAME,
     LOCK_SERIAL,
     LOCK_STATE,
@@ -71,8 +70,7 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
     """Representation of a Danalock lock."""
 
     _attr_has_entity_name = True
-    _attr_is_locked = None
-    # Add OPEN feature - assumes 'unlock' also unlatches for now
+    _attr_is_locked = None # Initial state is unknown until first update
     _attr_supported_features = LockEntityFeature.OPEN
 
     def __init__(
@@ -86,219 +84,136 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
         self._api_client = api_client
         self._lock_info = lock_info
         self._serial = lock_info[LOCK_SERIAL]
+        # Use the name from lock_info, fallback to a default
         self._attr_name = lock_info.get(LOCK_NAME, f"Danalock {self._serial}")
         self._attr_unique_id = f"danalock_cloud_{self._serial}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
-            name=self._attr_name,
+            name=self._attr_name, # Use the same name for the device
             manufacturer="Danalock",
             model="V3 (Cloud)",
         )
-        self._update_state()
+        # Initialize state from coordinator if data is already available
+        self._update_state_from_coordinator()
+        # Entity is available by default, coordinator will update if API fails long-term
         self._attr_available = True
 
-        _LOGGER.debug(
-            "Created lock entity: %s (Serial: %s, State: %s, Available: %s)",
-            self._attr_name,
-            self._serial,
-            self._attr_is_locked,
-            self._attr_available,
-        )
 
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        return True
+        # The lock is available if the coordinator is, or if it's the first update.
+        # This prevents the lock from becoming unavailable during initial setup.
+        return self.coordinator.last_update_success or not self.coordinator.data
+
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
         _LOGGER.debug(
-            "Updating state for lock %s from coordinator data", self._serial
+            "Coordinator update received for lock %s.", self._serial
         )
-        self._update_state()
+        self._update_state_from_coordinator()
         self.async_write_ha_state()
 
-    def _update_state(self) -> None:
+    def _update_state_from_coordinator(self) -> None:
         """Update internal state attributes based on coordinator data."""
-        if not self.coordinator.data:
-            _LOGGER.debug(
-                "No coordinator data available yet for %s", self._serial
-            )
-            return
-
-        if self._serial not in self.coordinator.data:
-            _LOGGER.debug("Lock %s missing from coordinator data", self._serial)
+        if not self.coordinator.data or self._serial not in self.coordinator.data:
+            _LOGGER.debug("No data for lock %s in coordinator update.", self._serial)
+            # Don't change state if no data, keep last known state
             return
 
         lock_data = self.coordinator.data[self._serial]
-        state = lock_data.get(LOCK_STATE)
+        state = lock_data.get(LOCK_STATE) # This could be None if get_lock_data failed
+
+        current_ha_state = self._attr_is_locked
+        new_ha_state = current_ha_state # Default to no change
 
         if state == API_STATE_LOCKED:
-            if self._attr_is_locked is not True:
-                _LOGGER.debug("Lock %s state updated to: LOCKED", self._serial)
-            self._attr_is_locked = True
+            new_ha_state = True
         elif state == API_STATE_UNLOCKED:
-            if self._attr_is_locked is not False:
-                _LOGGER.debug("Lock %s state updated to: UNLOCKED", self._serial)
-            self._attr_is_locked = False
+            new_ha_state = False
         elif state is None:
             _LOGGER.debug(
-                "Lock %s state returned as None from API, keeping previous state: %s",
+                "Lock %s state from API was None. Retaining current HA state: %s",
                 self._serial,
-                "Locked"
-                if self._attr_is_locked
-                else "Unlocked"
-                if self._attr_is_locked is False
-                else "Unknown",
+                "Locked" if current_ha_state else "Unlocked" if current_ha_state is False else "Unknown"
             )
+            # No change to new_ha_state, it remains current_ha_state
         else:
             _LOGGER.warning(
-                "Lock %s received unexpected state from API: %s",
-                self._serial,
-                state,
+                "Lock %s received unexpected state from API via coordinator: %s. Retaining current HA state.",
+                self._serial, state
             )
+            # No change to new_ha_state
+
+        if new_ha_state != current_ha_state:
+            _LOGGER.info("Lock %s state changing from %s to %s", self._serial, current_ha_state, new_ha_state)
+            self._attr_is_locked = new_ha_state
+        else:
+            _LOGGER.debug("Lock %s state (%s) unchanged by coordinator update.", self._serial, current_ha_state)
+
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the device."""
-        _LOGGER.info(
-            "Locking %s (%s) - current state: %s",
-            self._attr_name,
-            self._serial,
-            "Locked"
-            if self._attr_is_locked
-            else "Unlocked"
-            if self._attr_is_locked is False
-            else "Unknown",
-        )
+        _LOGGER.info("Attempting to lock %s (%s)", self._attr_name, self._serial)
 
         self._attr_is_locking = True
-        self._attr_is_locked = True
         self.async_write_ha_state()
 
         success = False
         error_message = None
         try:
-            _LOGGER.debug("Calling api_client.lock for %s", self._serial)
             success = await self._api_client.lock(self._serial)
-            _LOGGER.debug(
-                "Lock API call completed with result: %s", success
-            )
         except Exception as e:
-            _LOGGER.exception(
-                "Unexpected exception during lock API call: %s", e
-            )
-            success = False
+            _LOGGER.exception("Exception during lock API call for %s: %s", self._serial, e)
             error_message = str(e)
         finally:
             self._attr_is_locking = False
+            self.async_write_ha_state() # Update to remove "locking" attribute
 
         if success:
-            _LOGGER.info(
-                "Successfully sent lock command for %s", self._attr_name
-            )
-            self.hass.bus.async_fire(
-                EVENT_LOCK_COMMAND_SUCCESS,
-                {
-                    "entity_id": self.entity_id,
-                    "serial_number": self._serial,
-                    "command": "lock",
-                },
-            )
+            _LOGGER.info("Lock command successful for %s. Requesting delayed update.", self._attr_name)
+            self.hass.bus.async_fire(EVENT_LOCK_COMMAND_SUCCESS, {"entity_id": self.entity_id, "command": "lock"})
             self.hass.async_create_task(self._delayed_update())
         else:
-            _LOGGER.error(
-                "Failed to lock %s - API returned failure or exception occurred",
-                self._attr_name,
-            )
-            self.hass.bus.async_fire(
-                EVENT_LOCK_COMMAND_FAILURE,
-                {
-                    "entity_id": self.entity_id,
-                    "serial_number": self._serial,
-                    "command": "lock",
-                    "error": error_message or "API returned failure",
-                },
-            )
-            self._attr_is_locked = None
-            await self.coordinator.async_request_refresh()
+            _LOGGER.error("Failed to send lock command for %s. Error: %s. State may be stale.", self._attr_name, error_message or "API returned failure")
+            self.hass.bus.async_fire(EVENT_LOCK_COMMAND_FAILURE, {"entity_id": self.entity_id, "command": "lock", "error": error_message or "API returned failure"})
+            if self.coordinator:
+                await self.coordinator.async_request_refresh()
 
-        self.async_write_ha_state()
 
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the device."""
-        _LOGGER.info(
-            "Unlocking %s (%s) - current state: %s",
-            self._attr_name,
-            self._serial,
-            "Locked"
-            if self._attr_is_locked
-            else "Unlocked"
-            if self._attr_is_locked is False
-            else "Unknown",
-        )
+        _LOGGER.info("Attempting to unlock %s (%s)", self._attr_name, self._serial)
 
         self._attr_is_unlocking = True
-        self._attr_is_locked = False
         self.async_write_ha_state()
 
         success = False
         error_message = None
         try:
-            _LOGGER.debug("Calling api_client.unlock for %s", self._serial)
             success = await self._api_client.unlock(self._serial)
-            _LOGGER.debug(
-                "Unlock API call completed with result: %s", success
-            )
         except Exception as e:
-            _LOGGER.exception(
-                "Unexpected exception during unlock API call: %s", e
-            )
-            success = False
+            _LOGGER.exception("Exception during unlock API call for %s: %s", self._serial, e)
             error_message = str(e)
         finally:
             self._attr_is_unlocking = False
+            self.async_write_ha_state() # Update to remove "unlocking" attribute
 
         if success:
-            _LOGGER.info(
-                "Successfully sent unlock command for %s", self._attr_name
-            )
-            self.hass.bus.async_fire(
-                EVENT_LOCK_COMMAND_SUCCESS,
-                {
-                    "entity_id": self.entity_id,
-                    "serial_number": self._serial,
-                    "command": "unlock",
-                },
-            )
+            _LOGGER.info("Unlock command successful for %s. Requesting delayed update.", self._attr_name)
+            self.hass.bus.async_fire(EVENT_LOCK_COMMAND_SUCCESS, {"entity_id": self.entity_id, "command": "unlock"})
             self.hass.async_create_task(self._delayed_update())
         else:
-            _LOGGER.error(
-                "Failed to unlock %s - API returned failure or exception occurred",
-                self._attr_name,
-            )
-            self.hass.bus.async_fire(
-                EVENT_LOCK_COMMAND_FAILURE,
-                {
-                    "entity_id": self.entity_id,
-                    "serial_number": self._serial,
-                    "command": "unlock",
-                    "error": error_message or "API returned failure",
-                },
-            )
-            self._attr_is_locked = None
-            await self.coordinator.async_request_refresh()
-
-        self.async_write_ha_state()
+            _LOGGER.error("Failed to send unlock command for %s. Error: %s. State may be stale.", self._attr_name, error_message or "API returned failure")
+            self.hass.bus.async_fire(EVENT_LOCK_COMMAND_FAILURE, {"entity_id": self.entity_id, "command": "unlock", "error": error_message or "API returned failure"})
+            if self.coordinator:
+                await self.coordinator.async_request_refresh()
 
     async def async_open(self, **kwargs: Any) -> None:
         """Open the lock (unlatch). Assumes same as unlock for now."""
-        _LOGGER.info(
-            "Opening (unlatching) %s - calling unlock", self._attr_name
-        )
-        # If Danalock has a specific 'open' or 'unlatch' command,
-        # call a dedicated api_client method here.
-        # For now, we assume 'open' means 'unlock'.
+        _LOGGER.info("Opening (unlatching) %s - calling unlock", self._attr_name)
         await self.async_unlock(**kwargs)
 
     async def _delayed_update(self) -> None:
@@ -310,6 +225,7 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
         )
         await asyncio.sleep(COMMAND_UPDATE_DELAY.total_seconds())
         if self.coordinator:
+            _LOGGER.debug("Requesting refresh from coordinator for %s after delay.", self._attr_name)
             await self.coordinator.async_request_refresh()
         else:
             _LOGGER.warning(
