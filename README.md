@@ -128,6 +128,12 @@ Contributions are welcome! Please feel free to open an issue or submit a pull re
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
+---
+**Disclaimer:**
+
+This is an unofficial, community-developed integration. Danalock® and the Danalock logo are trademarks of Danalock International ApS. This project is not affiliated with, endorsed by, or sponsored by Danalock International ApS. The logo is used here for identification purposes only, to indicate the product this integration is designed to work with.
+
+
 <!-- Badges -->
 [hacs-shield]: https://img.shields.io/badge/HACS-Custom-41BDF5.svg
 [hacs-url]: https://hacs.xyz/
