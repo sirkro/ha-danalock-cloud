@@ -89,9 +89,9 @@ This integration provides the following service:
     *   **Description:** Forces an immediate refresh of all Danalock device states and battery levels from the cloud API for all configured Danalock Cloud accounts.
     *   **Use Cases:** Useful in automations after a lock/unlock command if you want to try and get an updated state sooner than the next scheduled poll, or for debugging if you suspect the state is stale.
     *   **Example Service Call in Automation:**
-
-        action:
-          - service: danalock_cloud.refresh_devices
+    ```yaml
+    action:
+      - service: danalock_cloud.refresh_devices
 
 ## Troubleshooting
 
