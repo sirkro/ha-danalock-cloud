@@ -11,7 +11,7 @@ from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN, ACCESS_TOKEN, REFRESH_TOKEN, TOKEN_EXPIRES_AT
+from .const import DOMAIN, ACCESS_TOKEN, REFRESH_TOKEN, TOKEN_EXPIRES_AT, LOCK_NAME as DIAG_LOCK_NAME, LOCK_STATE as DIAG_LOCK_STATE, LOCK_BATTERY as DIAG_LOCK_BATTERY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,109 +32,73 @@ async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
-    try:
-        # Start with basic entry information
-        diag_data = {
-            "entry": {
-                "entry_id": entry.entry_id,
-                "title": entry.title,
-                "version": entry.version,
-                "domain": entry.domain,
-                "source": entry.source,
-                "state": entry.state,
-                # Don't include raw data or options to avoid leaking sensitive info
-            },
-            "options": {
-                "update_interval": entry.options.get("update_interval", "not set")
-            },
-        }
+    diag_data: Dict[str, Any] = {
+        "entry": {
+            "entry_id": entry.entry_id,
+            "title": entry.title,
+            "version": entry.version,
+            "domain": entry.domain,
+            "source": entry.source,
+            "state": entry.state.value, # Use .value for enum
+            "options": async_redact_data(entry.options, TO_REDACT),
+            "data_keys": list(entry.data.keys()), # Show keys, not values for sensitive data
+        },
+        "diagnostics_version": "1.0.2", # Version of this diagnostics structure
+    }
 
-        # Check if the domain data exists
-        if DOMAIN not in hass.data or entry.entry_id not in hass.data.get(DOMAIN, {}):
-            diag_data["error"] = "Integration data not found. Setup may have failed or is in progress."
-            return diag_data
-
-        data = hass.data[DOMAIN][entry.entry_id]
-        
-        # Safe extraction of coordinator info
-        coordinator = data.get("coordinator")
-        if coordinator:
-            try:
-                coordinator_info = {
-                    "last_update_success": coordinator.last_update_success,
-                    "last_update_timestamp": coordinator.last_update_success_timestamp.isoformat() 
-                                            if coordinator.last_update_success_timestamp else None,
-                    "update_interval": str(coordinator.update_interval),
-                    "has_data": bool(coordinator.data),
-                    "data_keys": list(coordinator.data.keys()) if coordinator.data else [],
-                }
-                
-                # Safely extract some coordinator data for diagnostics
-                if coordinator.data:
-                    # Create a safe copy, only including non-sensitive keys and redacted values
-                    safe_data = {}
-                    for serial, lock_data in coordinator.data.items():
-                        if isinstance(lock_data, dict):
-                            safe_data[serial] = {
-                                "has_state": "state" in lock_data,
-                                "has_battery": "battery_level" in lock_data,
-                                "name": lock_data.get("name", "Unknown"),
-                            }
-                    
-                    coordinator_info["data_sample"] = safe_data
-                
-                diag_data["coordinator"] = coordinator_info
-            except Exception as err:
-                diag_data["coordinator_error"] = f"Error extracting coordinator info: {err}"
-        
-        # Safely extract lock info
-        locks_info = data.get("locks", [])
-        if locks_info:
-            try:
-                diag_data["locks_discovered"] = [
-                    {"name": lock.get("name", "Unknown")} for lock in locks_info
-                ]
-                diag_data["lock_count"] = len(locks_info)
-            except Exception as err:
-                diag_data["locks_error"] = f"Error extracting locks info: {err}"
-        else:
-            diag_data["locks_discovered"] = "No locks found"
-        
-        # API client info (carefully redacted)
-        api_client = data.get("api_client")
-        if api_client:
-            try:
-                # Safe extraction of expiry info
-                token_expiry = getattr(api_client, "_token_expires_at", None)
-                expiry_info = {}
-                
-                if token_expiry and isinstance(token_expiry, (int, float)) and token_expiry > 0:
-                    try:
-                        current_time = time.time()
-                        expiry_info = {
-                            "expires_in_seconds": max(0, round(token_expiry - current_time)),
-                            "expired": token_expiry < current_time,
-                            # Don't include the actual timestamp
-                        }
-                    except Exception:
-                        expiry_info = {"error": "Unable to calculate expiry"}
-                
-                diag_data["api_client_info"] = {
-                    "has_access_token": bool(getattr(api_client, "_access_token", None)),
-                    "has_refresh_token": bool(getattr(api_client, "_refresh_token", None)),
-                    "token_expiry": expiry_info,
-                }
-            except Exception as err:
-                diag_data["api_client_error"] = f"Error extracting API client info: {err}"
-                
-        # Add version info
-        diag_data["diagnostics_version"] = "1.0.1"
-        
+    if DOMAIN not in hass.data or entry.entry_id not in hass.data.get(DOMAIN, {}):
+        diag_data["error"] = "Integration data not found. Setup may have failed or is in progress."
         return diag_data
+
+    data = hass.data[DOMAIN][entry.entry_id]
+    
+    coordinator: Optional[DataUpdateCoordinator] = data.get("coordinator")
+    if coordinator:
+        last_update_timestamp_iso = None
+        if coordinator.last_update_success_timestamp:
+            last_update_timestamp_iso = coordinator.last_update_success_timestamp.isoformat()
         
-    except Exception as err:
-        _LOGGER.exception("Error generating diagnostics")
-        return {
-            "error": f"Failed to generate diagnostics: {err}",
-            "entry_id": entry.entry_id
+        diag_data["coordinator"] = {
+            "last_update_success": coordinator.last_update_success,
+            "last_update_timestamp": last_update_timestamp_iso,
+            "update_interval": str(coordinator.update_interval),
+            "has_data": bool(coordinator.data),
+            "data_keys_count": len(coordinator.data.keys()) if coordinator.data else 0,
         }
+        if coordinator.data:
+            safe_data_sample = {}
+            for serial, lock_item_data in coordinator.data.items():
+                if isinstance(lock_item_data, dict):
+                    safe_data_sample[serial] = {
+                        "name": lock_item_data.get(DIAG_LOCK_NAME, "Unknown"),
+                        "has_state_info": DIAG_LOCK_STATE in lock_item_data,
+                        "has_battery_info": DIAG_LOCK_BATTERY in lock_item_data,
+                        # Do not include actual state or battery values here
+                    }
+            diag_data["coordinator"]["data_sample_structure"] = safe_data_sample
+    
+    locks_info = data.get("locks", [])
+    diag_data["discovered_locks_at_setup"] = [
+        {"name": lock.get(DIAG_LOCK_NAME, "Unknown")} for lock in locks_info
+    ]
+    diag_data["discovered_locks_count"] = len(locks_info)
+    
+    api_client = data.get("api_client")
+    if api_client:
+        token_expiry = getattr(api_client, "_token_expires_at", 0.0)
+        expiry_info = {}
+        if token_expiry > 0:
+            current_time_val = time.time()
+            expiry_info = {
+                "expires_in_seconds": max(0, round(token_expiry - current_time_val)),
+                "is_expired": token_expiry < current_time_val,
+            }
+        
+        diag_data["api_client_status"] = {
+            "has_access_token": bool(getattr(api_client, "_access_token", None)),
+            "has_refresh_token": bool(getattr(api_client, "_refresh_token", None)),
+            "has_password_stored_in_client": bool(getattr(api_client, "_password", None)),
+            "token_expiry_info": expiry_info,
+        }
+            
+    return diag_data
