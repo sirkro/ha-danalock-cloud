@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
-from homeassistant.config_entries import ConfigEntry # Import ConfigEntry
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -47,7 +47,6 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# --- Exception classes remain the same ---
 class DanalockApiClientError(Exception):
     """Base exception for API client errors."""
 class DanalockApiAuthError(DanalockApiClientError):
@@ -62,7 +61,7 @@ class DanalockApiClient:
     """Danalock Cloud API Client."""
 
     _hass: HomeAssistant
-    _entry: Optional[ConfigEntry] # Make entry optional
+    _entry: Optional[ConfigEntry]
     _username: str
     _password: Optional[str]
     _access_token: Optional[str]
@@ -74,14 +73,14 @@ class DanalockApiClient:
         hass: HomeAssistant,
         username: str,
         password: Optional[str] = None,
-        entry: Optional[ConfigEntry] = None, # Make entry optional, default None
+        entry: Optional[ConfigEntry] = None,
         access_token: Optional[str] = None,
         refresh_token: Optional[str] = None,
         token_expires_at: Optional[float] = None,
     ) -> None:
         """Initialize the API client."""
         self._hass = hass
-        self._entry = entry # Store entry if provided
+        self._entry = entry
         self._username = username
         self._password = password
         self._access_token = access_token
@@ -91,40 +90,36 @@ class DanalockApiClient:
         self._lock = asyncio.Lock()
 
     async def _persist_updated_tokens(self) -> None:
-        """Save potentially updated tokens back to the ConfigEntry."""
+        """Save potentially updated tokens and password back to the ConfigEntry."""
         if not self._entry:
             _LOGGER.debug("API Client instance has no ConfigEntry, skipping token persistence.")
             return
 
-        current_tokens = {
+        # Construct the data to be saved, ensuring all necessary fields are present
+        # and reflect the current state of the API client.
+        new_data = {
+            CONF_USERNAME: self._username, # Username should always be there
+            CONF_PASSWORD: self._password, # Persist current password state (could be None if cleared)
             ACCESS_TOKEN: self._access_token,
             REFRESH_TOKEN: self._refresh_token,
             TOKEN_EXPIRES_AT: self._token_expires_at,
         }
-        if not self._access_token or not self._refresh_token:
-             _LOGGER.warning("[%s] Attempted to persist tokens, but current tokens are invalid. Skipping.", self._entry.entry_id)
-             return
 
-        entry_data = self._entry.data.copy()
-        new_data = {
-            CONF_USERNAME: entry_data.get(CONF_USERNAME),
-            CONF_PASSWORD: entry_data.get(CONF_PASSWORD), # Keep existing password
-            **current_tokens
-        }
-        # Update password in storage only if the current instance password is set (meaning it was likely just validated)
-        if self._password:
-             new_data[CONF_PASSWORD] = self._password
+        # Get a fresh copy of the current entry data to compare against
+        current_entry_data = self._entry.data.copy()
 
-        if (entry_data.get(ACCESS_TOKEN) != new_data[ACCESS_TOKEN] or
-            entry_data.get(REFRESH_TOKEN) != new_data[REFRESH_TOKEN] or
-            entry_data.get(TOKEN_EXPIRES_AT) != new_data[TOKEN_EXPIRES_AT] or
-            entry_data.get(CONF_PASSWORD) != new_data[CONF_PASSWORD]): # Also check if password changed
+        # Only update if there's an actual change in the relevant fields
+        if (current_entry_data.get(ACCESS_TOKEN) != new_data[ACCESS_TOKEN] or
+            current_entry_data.get(REFRESH_TOKEN) != new_data[REFRESH_TOKEN] or
+            current_entry_data.get(TOKEN_EXPIRES_AT) != new_data[TOKEN_EXPIRES_AT] or
+            current_entry_data.get(CONF_PASSWORD) != new_data[CONF_PASSWORD]):
             _LOGGER.info("[%s] Persisting updated tokens/password to config entry.", self._entry.entry_id)
             self._hass.config_entries.async_update_entry(
                 self._entry, data=new_data
             )
         else:
-            _LOGGER.debug("[%s] Tokens checked after auth event, no changes needed persistence.", self._entry.entry_id)
+            _LOGGER.debug("[%s] Tokens/password checked, no changes needed for persistence.", self._entry.entry_id)
+
 
     async def _request(
         self,
@@ -162,10 +157,11 @@ class DanalockApiClient:
 
                 if response.status == 401:
                      _LOGGER.warning("API request to %s failed with 401 (Unauthorized).", url)
-                     if use_auth:
+                     if use_auth: # Only clear tokens if auth was supposed to be used
                          async with self._lock:
                              self._access_token = None
                              self._token_expires_at = 0.0
+                             # Do not clear refresh_token here, _ensure_token_valid will handle it
                      raise ConfigEntryAuthFailed(f"Authentication failed (401) for {url}")
 
                 if not (200 <= response.status < 300):
@@ -198,7 +194,7 @@ class DanalockApiClient:
             raise DanalockApiClientError("Request timed out") from TimeoutError
         except ConfigEntryAuthFailed:
              raise
-        except DanalockApiAuthError as e:
+        except DanalockApiAuthError as e: # Should be caught by ConfigEntryAuthFailed already
              raise ConfigEntryAuthFailed("Authentication required") from e
         except Exception as e:
             _LOGGER.exception("An unexpected error occurred during API request to %s", url)
@@ -216,15 +212,13 @@ class DanalockApiClient:
             auth_successful = False
             last_auth_error = None
 
-            # Attempt 1: Refresh Token
             if self._refresh_token:
                 _LOGGER.debug("Attempting token refresh using refresh token.")
                 try:
-                    await self._refresh_access_token()
+                    await self._refresh_access_token() # Persists on success internally
                     if self._access_token and self._token_expires_at and self._token_expires_at >= (current_time + 60):
                         _LOGGER.debug("Token refresh successful.")
                         auth_successful = True
-                        # Persistence is handled within _refresh_access_token now
                 except (DanalockApiAuthError, ConfigEntryAuthFailed) as err:
                      _LOGGER.warning("Refresh token failed (%s). Invalidating tokens and attempting password auth.", err)
                      last_auth_error = err
@@ -238,47 +232,42 @@ class DanalockApiClient:
                      self._refresh_token = None
                      self._token_expires_at = 0.0
 
-            # Attempt 2: Password Authentication
             if not auth_successful and self._password:
                 _LOGGER.info("Attempting full authentication using stored password.")
                 try:
-                    await self.authenticate(self._username, self._password)
+                    await self.authenticate(self._username, self._password) # Persists on success internally
                     if self._access_token and self._token_expires_at and self._token_expires_at >= (current_time + 60):
                         _LOGGER.info("Password authentication successful.")
                         auth_successful = True
                         last_auth_error = None
-                        # Persistence is handled within authenticate() now
                     else:
                          _LOGGER.error("Password authentication attempt finished, but tokens are still invalid.")
                          if not last_auth_error:
                              last_auth_error = ConfigEntryAuthFailed("Password authentication failed unexpectedly.")
                 except (DanalockApiAuthError, ConfigEntryAuthFailed) as err:
-                     _LOGGER.error("Password authentication failed: %s", err)
+                     _LOGGER.error("Password authentication failed: %s. Clearing stored password.", err)
                      last_auth_error = err
-                     self._password = None # Assume password was wrong
+                     self._password = None
                      self._access_token = None
                      self._refresh_token = None
                      self._token_expires_at = 0.0
-                     # Persist the cleared password immediately
-                     await self._persist_updated_tokens()
+                     await self._persist_updated_tokens() # Persist cleared password
                 except Exception as e:
-                    _LOGGER.error("Unexpected error during password authentication: %s", e, exc_info=True)
+                    _LOGGER.error("Unexpected error during password authentication: %s. Clearing stored password.", e, exc_info=True)
                     last_auth_error = e
                     self._password = None
                     self._access_token = None
                     self._refresh_token = None
                     self._token_expires_at = 0.0
-                    await self._persist_updated_tokens() # Persist cleared password
+                    await self._persist_updated_tokens()
 
-            # --- Final Outcome ---
             if not auth_successful:
-                final_error_msg = "Authentication failed: Cannot refresh token or authenticate with password."
+                final_error_msg = "Authentication required. All recovery attempts (refresh token, stored password) failed."
                 _LOGGER.error(final_error_msg)
                 if self._entry:
                     _LOGGER.warning("[%s] Triggering reauth flow due to persistent authentication failure.", self._entry.entry_id)
                     self._entry.async_start_reauth(self._hass)
                 raise ConfigEntryAuthFailed(final_error_msg) from last_auth_error
-            # If successful, token is now valid
 
 
     async def authenticate(self, username: str, password: str) -> Dict[str, Any]:
@@ -300,7 +289,6 @@ class DanalockApiClient:
                  _LOGGER.error("Authentication response missing required keys: %s", response)
                  raise DanalockApiAuthError("Invalid authentication response format")
 
-            # Update internal state
             self._access_token = response[ACCESS_TOKEN]
             self._refresh_token = response[REFRESH_TOKEN]
             self._token_expires_at = time() + response[EXPIRES_IN]
@@ -308,7 +296,7 @@ class DanalockApiClient:
             self._password = password # Store the valid password
 
             _LOGGER.info("Authentication successful. Persisting new tokens.")
-            await self._persist_updated_tokens() # Persist immediately
+            await self._persist_updated_tokens()
 
             return {
                 ACCESS_TOKEN: self._access_token,
@@ -325,10 +313,11 @@ class DanalockApiClient:
 
 
     async def _refresh_access_token(self) -> None:
-        """Refresh the access token. Updates internal state but relies on caller to persist."""
+        """Refresh the access token. Updates internal state and persists."""
         _LOGGER.info("Refreshing access token for user %s", self._username)
         if not self._refresh_token:
-            raise DanalockApiAuthError("Missing refresh token")
+            # This should ideally be caught by _ensure_token_valid before calling.
+            raise DanalockApiAuthError("Missing refresh token for refresh attempt.")
 
         data = {
             "grant_type": "refresh_token",
@@ -345,18 +334,17 @@ class DanalockApiClient:
                  _LOGGER.error("Token refresh response missing required keys: %s", response)
                  raise DanalockApiAuthError("Invalid token refresh response format")
 
-            # Update internal state
             self._access_token = response[ACCESS_TOKEN]
             new_refresh_token = response.get(REFRESH_TOKEN)
             if new_refresh_token and new_refresh_token != self._refresh_token:
                 _LOGGER.info("Received new refresh token during refresh.")
                 self._refresh_token = new_refresh_token
             elif not new_refresh_token:
-                 _LOGGER.warning("Refresh token response did not contain a refresh token.")
+                 _LOGGER.warning("Refresh token response did not contain a new refresh token; old one will be reused if still valid.")
 
             self._token_expires_at = time() + response[EXPIRES_IN]
             _LOGGER.info("Access token refreshed successfully.")
-            # Persistence handled by caller (_ensure_token_valid)
+            await self._persist_updated_tokens() # Persist new tokens
 
         except (DanalockApiError, DanalockApiClientError, ConfigEntryAuthFailed) as e:
             _LOGGER.error("Failed to refresh access token: %s", e)
@@ -364,7 +352,6 @@ class DanalockApiClient:
                  raise DanalockApiAuthError("Invalid refresh token") from e
             raise DanalockApiAuthError(f"Token refresh failed due to API error: {e}") from e
 
-    # --- Other methods (get_locks, _execute_and_poll, etc.) remain unchanged ---
     async def get_locks(self) -> List[Dict[str, Any]]:
         """Retrieve a list of locks associated with the account."""
         _LOGGER.info("Fetching list of locks")
@@ -419,7 +406,6 @@ class DanalockApiClient:
             "Accept": "application/json",
         }
 
-        # --- Step 1: Execute Command ---
         try:
             exec_response = await self._request("POST", EXECUTE_URL, json=payload, headers=headers)
             if not isinstance(exec_response, dict):
@@ -442,8 +428,6 @@ class DanalockApiClient:
             _LOGGER.exception("Unexpected error during execute step for %s on %s", operation, serial_number)
             raise DanalockJobError(f"Unexpected error executing command {operation}") from e
 
-
-        # --- Step 2: Poll Job Status ---
         start_time = time()
         poll_count = 0
         last_status = None
@@ -482,6 +466,9 @@ class DanalockApiClient:
                     raise DanalockJobError(f"Operation {operation} failed: {error_detail}")
                 elif status == JOB_STATUS_IN_PROGRESS:
                     _LOGGER.debug("Job %s for %s still in progress...", job_id, operation)
+                    continue
+                elif status == "Created": # Handle 'Created' status explicitly if it persists
+                    _LOGGER.debug("Job %s for %s still in 'Created' state. Continuing poll.", job_id, operation)
                     continue
                 else:
                     _LOGGER.warning("Job %s for %s returned unexpected status: %s (Response: %s)", job_id, operation, status, poll_response)
@@ -606,4 +593,3 @@ class DanalockApiClient:
             LOCK_STATE: state,
             LOCK_BATTERY: battery,
         }
-
