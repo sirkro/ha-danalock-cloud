@@ -8,6 +8,7 @@ PLATFORMS: Final = ["lock", "sensor"]
 # Configuration Constants
 CONF_USERNAME: Final = "username"
 CONF_PASSWORD: Final = "password"
+CONF_OPTIMISTIC_MODE: Final = "optimistic_mode" # New constant for options
 
 # API Endpoints
 API_BASE_URL: Final = "https://api.danalock.com"
@@ -21,8 +22,7 @@ POLL_URL: Final = f"{BRIDGE_API_BASE_URL}/poll"
 CLIENT_ID: Final = "danalock-web"
 DEFAULT_TIMEOUT: Final = 20
 JOB_POLL_INTERVAL: Final = 2
-# Increase timeout to be greater than the server's 1-minute timeout
-JOB_POLL_TIMEOUT: Final = 70 # seconds total timeout for a bridge job
+JOB_POLL_TIMEOUT: Final = 70
 UPDATE_INTERVAL: Final = timedelta(minutes=5)
 COMMAND_UPDATE_DELAY: Final = timedelta(seconds=15)
 
