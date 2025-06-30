@@ -31,9 +31,10 @@
       "step": {
           "init": {
               "title": "Danalock Cloud Options",
-              "description": "Adjust Danalock Cloud integration options.",
+              "description": "Adjust Danalock Cloud integration options. The optimistic state update provides instant UI feedback but may be temporarily inaccurate.",
               "data": {
-                  "update_interval": "Update Interval (Minutes)"
+                  "update_interval": "Update Interval (Minutes)",
+                  "optimistic_mode": "Use Optimistic State Updates"
               }
           }
       }
@@ -45,9 +46,6 @@
         }
     },
     "entity": {
-        "lock": {
-            "state_attributes": {}
-        },
         "sensor": {
             "battery": {
                 "name": "Battery"
