@@ -1,19 +1,11 @@
-# custom_components/danalock_cloud/config_flow.py
-
 """Config flow for Danalock Cloud integration."""
 import logging
 from typing import Any, Dict, Optional
 
 import voluptuous as vol
-from time import time
-from datetime import timedelta
-
 from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
-
-from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.schema_config_entry_flow import (
     SchemaFlowFormStep,
     SchemaOptionsFlowHandler,
@@ -28,9 +20,9 @@ from .const import (
     DOMAIN,
     ACCESS_TOKEN,
     REFRESH_TOKEN,
-    EXPIRES_IN,
     TOKEN_EXPIRES_AT,
-    UPDATE_INTERVAL
+    UPDATE_INTERVAL,
+    CONF_OPTIMISTIC_MODE, # Import new constant
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,33 +34,36 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     }
 )
 
-STEP_REAUTH_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_PASSWORD): str,
-    }
-)
-
-OPTIONS_SCHEMA = vol.Schema({
-    vol.Optional(
-        "update_interval",
-        default=int(UPDATE_INTERVAL.total_seconds() / 60)
-    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
-})
-
-OPTIONS_FLOW = {
-    "init": SchemaFlowFormStep(OPTIONS_SCHEMA),
-}
-
+# --- Define Options Schema ---
+def options_schema(options: dict) -> vol.Schema:
+    """Return schema for options."""
+    return vol.Schema({
+        vol.Optional(
+            "update_interval",
+            default=options.get("update_interval", int(UPDATE_INTERVAL.total_seconds() / 60))
+        ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
+        vol.Optional(
+            CONF_OPTIMISTIC_MODE,
+            default=options.get(CONF_OPTIMISTIC_MODE, False)
+        ): bool,
+    })
+# --- End Options Schema ---
 
 class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Danalock Cloud."""
 
     VERSION = 1
-    reauth_entry: config_entries.ConfigEntry | None = None
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> "DanalockOptionsFlowHandler":
+        """Get the options flow for this handler."""
+        return DanalockOptionsFlowHandler(config_entry)
+
+    # ... (async_step_user and async_step_reauth remain unchanged) ...
     async def async_step_user(
         self, user_input: Optional[Dict[str, Any]] = None
-    ) -> FlowResult:
+    ) -> config_entries.FlowResult:
         """Handle the initial user setup step."""
         errors: Dict[str, str] = {}
 
@@ -89,7 +84,7 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if isinstance(auth_result, dict) and ACCESS_TOKEN in auth_result:
                 entry_data = {
                     CONF_USERNAME: username,
-                    CONF_PASSWORD: password, # Store password
+                    CONF_PASSWORD: password,
                     ACCESS_TOKEN: auth_result[ACCESS_TOKEN],
                     REFRESH_TOKEN: auth_result[REFRESH_TOKEN],
                     TOKEN_EXPIRES_AT: auth_result[TOKEN_EXPIRES_AT],
@@ -104,7 +99,7 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
         )
 
-    async def async_step_reauth(self, user_input: Optional[Dict[str, Any]] = None) -> FlowResult:
+    async def async_step_reauth(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.FlowResult:
         """Handle re-authentication when credentials become invalid."""
         self.reauth_entry = self.hass.config_entries.async_get_entry(
             self.context["entry_id"]
@@ -123,7 +118,7 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             if isinstance(auth_result, dict) and ACCESS_TOKEN in auth_result:
                 new_data = self.reauth_entry.data.copy()
-                new_data[CONF_PASSWORD] = password # Update stored password
+                new_data[CONF_PASSWORD] = password
                 new_data[ACCESS_TOKEN] = auth_result[ACCESS_TOKEN]
                 new_data[REFRESH_TOKEN] = auth_result[REFRESH_TOKEN]
                 new_data[TOKEN_EXPIRES_AT] = auth_result[TOKEN_EXPIRES_AT]
@@ -149,8 +144,7 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, username: str, password: str, return_data: bool = False
     ) -> Dict[str, str] | Dict[str, Any]:
         """Test credentials against the API."""
-        # Create client WITHOUT entry for testing only
-        api_client = DanalockApiClient(self.hass, username=username, password=password) # No entry passed
+        api_client = DanalockApiClient(self.hass, username=username, password=password)
         try:
             _LOGGER.debug("Attempting authentication for %s", username)
             auth_data = await api_client.authenticate(username, password)
@@ -166,10 +160,20 @@ class DanalockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.exception("Unexpected exception during authentication")
             return {"base": "unknown"}
 
+class DanalockOptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle a Danalock options flow."""
 
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> SchemaOptionsFlowHandler:
-        """Get the options flow for this handler."""
-        return SchemaOptionsFlowHandler(config_entry, OPTIONS_FLOW)
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize options flow."""
+        self.config_entry = config_entry
 
+    async def async_step_init(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.FlowResult:
+        """Manage the options."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        # Pass current options to the schema to pre-fill the form
+        return self.async_show_form(
+            step_id="init",
+            data_schema=options_schema(self.config_entry.options),
+        )
