@@ -9,7 +9,7 @@
     "issue_tracker": "https://github.com/furth3st/ha-danalock-cloud/issues",
     "loggers": ["custom_components.danalock_cloud"],
     "requirements": ["aiohttp>=3.8.0"],
-    "version": "1.2.0-beta.1",
+    "version": "1.2.0-beta.2",
     "platforms": [
       "lock",
       "sensor"
