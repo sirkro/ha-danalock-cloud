@@ -3,11 +3,11 @@ from typing import Final
 from datetime import timedelta
 
 DOMAIN: Final = "danalock_cloud"
-PLATFORMS: Final = ["lock", "sensor"] # Supported entity platforms
+PLATFORMS: Final = ["lock", "sensor"]
 
 # Configuration Constants
 CONF_USERNAME: Final = "username"
-CONF_PASSWORD: Final = "password" # Only used during initial setup/reauth
+CONF_PASSWORD: Final = "password"
 
 # API Endpoints
 API_BASE_URL: Final = "https://api.danalock.com"
@@ -19,17 +19,18 @@ POLL_URL: Final = f"{BRIDGE_API_BASE_URL}/poll"
 
 # API Constants
 CLIENT_ID: Final = "danalock-web"
-DEFAULT_TIMEOUT: Final = 20  # seconds for API requests
-JOB_POLL_INTERVAL: Final = 2  # seconds between job status polls
-JOB_POLL_TIMEOUT: Final = 30 # seconds total timeout for a bridge job
-UPDATE_INTERVAL: Final = timedelta(minutes=5) # Default polling interval
-COMMAND_UPDATE_DELAY: Final = timedelta(seconds=15) # Delay after command before forcing coordinator refresh
+DEFAULT_TIMEOUT: Final = 20
+JOB_POLL_INTERVAL: Final = 2
+# Increase timeout to be greater than the server's 1-minute timeout
+JOB_POLL_TIMEOUT: Final = 70 # seconds total timeout for a bridge job
+UPDATE_INTERVAL: Final = timedelta(minutes=5)
+COMMAND_UPDATE_DELAY: Final = timedelta(seconds=15)
 
-# Data Keys (Stored in ConfigEntry and Coordinator)
+# Data Keys
 ACCESS_TOKEN: Final = "access_token"
 REFRESH_TOKEN: Final = "refresh_token"
-EXPIRES_IN: Final = "expires_in" # Received from API, used to calculate expiry
-TOKEN_EXPIRES_AT: Final = "token_expires_at" # Calculated timestamp stored in ConfigEntry
+EXPIRES_IN: Final = "expires_in"
+TOKEN_EXPIRES_AT: Final = "token_expires_at"
 LOCK_SERIAL: Final = "serial_number"
 LOCK_NAME: Final = "name"
 LOCK_STATE: Final = "state"
@@ -60,4 +61,3 @@ SERVICE_REFRESH_DEVICES: Final = "refresh_devices"
 # Event Types
 EVENT_LOCK_COMMAND_SUCCESS: Final = f"{DOMAIN}_command_success"
 EVENT_LOCK_COMMAND_FAILURE: Final = f"{DOMAIN}_command_failure"
-
