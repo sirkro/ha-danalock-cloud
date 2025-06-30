@@ -1,5 +1,5 @@
 """Lock platform for Danalock Cloud."""
-import asyncio # Ensure asyncio is imported
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +21,7 @@ from .const import (
     LOCK_NAME,
     LOCK_SERIAL,
     LOCK_STATE,
+    CONF_OPTIMISTIC_MODE, # Import new constant
 )
 from .coordinator import DanalockDataUpdateCoordinator
 
@@ -70,7 +71,7 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
     """Representation of a Danalock lock."""
 
     _attr_has_entity_name = True
-    _attr_is_locked = None # Initial state is unknown until first update
+    _attr_is_locked = None
     _attr_supported_features = LockEntityFeature.OPEN
 
     def __init__(
@@ -84,35 +85,26 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
         self._api_client = api_client
         self._lock_info = lock_info
         self._serial = lock_info[LOCK_SERIAL]
-        # Use the name from lock_info, fallback to a default
         self._attr_name = lock_info.get(LOCK_NAME, f"Danalock {self._serial}")
         self._attr_unique_id = f"danalock_cloud_{self._serial}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
-            name=self._attr_name, # Use the same name for the device
+            name=self._attr_name,
             manufacturer="Danalock",
             model="V3 (Cloud)",
         )
-        # Initialize state from coordinator if data is already available
         self._update_state_from_coordinator()
-        # Entity is available by default, coordinator will update if API fails long-term
         self._attr_available = True
-
 
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        # The lock is available if the coordinator is, or if it's the first update.
-        # This prevents the lock from becoming unavailable during initial setup.
         return self.coordinator.last_update_success or not self.coordinator.data
-
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        _LOGGER.debug(
-            "Coordinator update received for lock %s.", self._serial
-        )
+        _LOGGER.debug("Coordinator update received for lock %s.", self._serial)
         self._update_state_from_coordinator()
         self.async_write_ha_state()
 
@@ -120,14 +112,13 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
         """Update internal state attributes based on coordinator data."""
         if not self.coordinator.data or self._serial not in self.coordinator.data:
             _LOGGER.debug("No data for lock %s in coordinator update.", self._serial)
-            # Don't change state if no data, keep last known state
             return
 
         lock_data = self.coordinator.data[self._serial]
-        state = lock_data.get(LOCK_STATE) # This could be None if get_lock_data failed
+        state = lock_data.get(LOCK_STATE)
 
         current_ha_state = self._attr_is_locked
-        new_ha_state = current_ha_state # Default to no change
+        new_ha_state = current_ha_state
 
         if state == API_STATE_LOCKED:
             new_ha_state = True
@@ -139,13 +130,11 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
                 self._serial,
                 "Locked" if current_ha_state else "Unlocked" if current_ha_state is False else "Unknown"
             )
-            # No change to new_ha_state, it remains current_ha_state
         else:
             _LOGGER.warning(
                 "Lock %s received unexpected state from API via coordinator: %s. Retaining current HA state.",
                 self._serial, state
             )
-            # No change to new_ha_state
 
         if new_ha_state != current_ha_state:
             _LOGGER.info("Lock %s state changing from %s to %s", self._serial, current_ha_state, new_ha_state)
@@ -153,10 +142,15 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
         else:
             _LOGGER.debug("Lock %s state (%s) unchanged by coordinator update.", self._serial, current_ha_state)
 
-
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the device."""
         _LOGGER.info("Attempting to lock %s (%s)", self._attr_name, self._serial)
+
+        # Optimistic state update if enabled
+        if self.coordinator.config_entry.options.get(CONF_OPTIMISTIC_MODE, False):
+            _LOGGER.debug("Optimistic mode enabled: setting state to locked.")
+            self._attr_is_locked = True
+            self.async_write_ha_state()
 
         self._attr_is_locking = True
         self.async_write_ha_state()
@@ -170,7 +164,7 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
             error_message = str(e)
         finally:
             self._attr_is_locking = False
-            self.async_write_ha_state() # Update to remove "locking" attribute
+            self.async_write_ha_state()
 
         if success:
             _LOGGER.info("Lock command successful for %s. Requesting delayed update.", self._attr_name)
@@ -182,10 +176,15 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
             if self.coordinator:
                 await self.coordinator.async_request_refresh()
 
-
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the device."""
         _LOGGER.info("Attempting to unlock %s (%s)", self._attr_name, self._serial)
+
+        # Optimistic state update if enabled
+        if self.coordinator.config_entry.options.get(CONF_OPTIMISTIC_MODE, False):
+            _LOGGER.debug("Optimistic mode enabled: setting state to unlocked.")
+            self._attr_is_locked = False
+            self.async_write_ha_state()
 
         self._attr_is_unlocking = True
         self.async_write_ha_state()
@@ -199,7 +198,7 @@ class DanalockLockEntity(CoordinatorEntity[DanalockDataUpdateCoordinator], LockE
             error_message = str(e)
         finally:
             self._attr_is_unlocking = False
-            self.async_write_ha_state() # Update to remove "unlocking" attribute
+            self.async_write_ha_state()
 
         if success:
             _LOGGER.info("Unlock command successful for %s. Requesting delayed update.", self._attr_name)
