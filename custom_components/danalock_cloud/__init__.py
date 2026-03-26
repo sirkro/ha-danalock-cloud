@@ -68,7 +68,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     try:
         _LOGGER.debug("[%s] Ensuring token validity or attempting initial auth.", entry.entry_id)
-        await api_client._ensure_token_valid()
+        await api_client.async_validate_auth()
 
         _LOGGER.debug("[%s] Fetching initial list of locks.", entry.entry_id)
         locks = await api_client.get_locks()

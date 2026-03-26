@@ -11,7 +11,7 @@ from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN, ACCESS_TOKEN, REFRESH_TOKEN, TOKEN_EXPIRES_AT, LOCK_NAME as DIAG_LOCK_NAME, LOCK_STATE as DIAG_LOCK_STATE, LOCK_BATTERY as DIAG_LOCK_BATTERY
+from .const import DOMAIN, ACCESS_TOKEN, REFRESH_TOKEN, LOCK_NAME as DIAG_LOCK_NAME, LOCK_STATE as DIAG_LOCK_STATE, LOCK_BATTERY as DIAG_LOCK_BATTERY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,7 +19,6 @@ TO_REDACT = {
     CONF_PASSWORD,
     ACCESS_TOKEN,
     REFRESH_TOKEN,
-    TOKEN_EXPIRES_AT,
     "password",
     "token",
     "tokens",

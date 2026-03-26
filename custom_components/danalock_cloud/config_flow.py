@@ -34,6 +34,12 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     }
 )
 
+STEP_REAUTH_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_PASSWORD): str,
+    }
+)
+
 # --- Define Options Schema ---
 def options_schema(options: dict) -> vol.Schema:
     """Return schema for options."""

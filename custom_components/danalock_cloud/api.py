@@ -49,6 +49,10 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36"
 
+# Backoff settings for consecutive token refresh failures
+_BACKOFF_BASE: float = 2.0       # seconds
+_BACKOFF_MAX: float = 300.0      # 5 minutes cap
+
 class DanalockApiClientError(Exception):
     """Base exception for API client errors."""
 class DanalockApiAuthError(DanalockApiClientError):
@@ -92,22 +96,27 @@ class DanalockApiClient:
         self._pending_refresh_token = None # Initialize pending token
         self._session = async_get_clientsession(hass)
         self._lock = asyncio.Lock()
+        self._consecutive_auth_failures: int = 0
+        self._next_auth_attempt_at: float = 0.0
 
     async def _persist_updated_tokens(self) -> None:
-        """Save current tokens and password back to the ConfigEntry."""
+        """Save current tokens back to the ConfigEntry. Password is NOT persisted here."""
         if not self._entry:
             return
 
         new_data = {
             CONF_USERNAME: self._username,
-            CONF_PASSWORD: self._password,
+            # Password is kept from the existing entry data to avoid writing it
+            # back on every token refresh. It is only written during explicit
+            # user-initiated auth (initial setup / reauth flow).
+            CONF_PASSWORD: self._entry.data.get(CONF_PASSWORD),
             ACCESS_TOKEN: self._access_token,
             REFRESH_TOKEN: self._refresh_token,
             TOKEN_EXPIRES_AT: self._token_expires_at,
         }
 
         if self._entry.data != new_data:
-            _LOGGER.info("[%s] Persisting updated tokens/password to config entry.", self._entry.entry_id)
+            _LOGGER.info("[%s] Persisting updated tokens to config entry.", self._entry.entry_id)
             self._hass.config_entries.async_update_entry(
                 self._entry, data=new_data
             )
@@ -141,7 +150,8 @@ class DanalockApiClient:
                  raise ConfigEntryAuthFailed("Access token missing after validation check.")
             final_headers["Authorization"] = f"Bearer {self._access_token}"
 
-        _LOGGER.debug("Request: %s %s (Headers: %s, Data: %s, Json: %s)", method, url, final_headers, data, json)
+        log_headers = {k: ("[REDACTED]" if k.lower() == "authorization" else v) for k, v in final_headers.items()}
+        _LOGGER.debug("Request: %s %s (Headers: %s, Data: %s, Json: %s)", method, url, log_headers, data, json)
 
         try:
             async with self._session.request(
@@ -160,7 +170,9 @@ class DanalockApiClient:
                         response_text_content = await response.text()
                     except Exception:
                         response_text_content = "Could not read response text."
-                    _LOGGER.error("API Error %s for %s %s: %s", response.status, method, url, response_text_content)
+                    is_auth_endpoint = url == TOKEN_URL
+                    log_body = "[REDACTED - auth endpoint]" if is_auth_endpoint else response_text_content
+                    _LOGGER.error("API Error %s for %s %s: %s", response.status, method, url, log_body)
                     if response.status == 401:
                         raise ConfigEntryAuthFailed(f"Authentication failed (401) for {url}")
                     raise DanalockApiError(f"API request failed: {response.status} - {response_text_content}")
@@ -190,15 +202,30 @@ class DanalockApiClient:
             raise DanalockApiClientError(f"Unexpected error during request: {e}") from e
 
 
+    async def async_validate_auth(self) -> None:
+        """Public method to ensure the token is valid. Raises ConfigEntryAuthFailed if not."""
+        await self._ensure_token_valid()
+
     async def _ensure_token_valid(self) -> None:
-        """Ensure the access token is valid, refreshing or re-authenticating if necessary."""
+        """Ensure the access token is valid, refreshing or triggering reauth if necessary."""
         async with self._lock:
             current_time = time()
             if self._access_token and self._token_expires_at and self._token_expires_at >= (current_time + 60):
                 return
 
+            # Enforce backoff if previous refresh attempts have failed
+            if self._next_auth_attempt_at > current_time:
+                wait_seconds = round(self._next_auth_attempt_at - current_time)
+                _LOGGER.warning(
+                    "Auth backoff active: skipping token refresh for another %ds after %d consecutive failure(s).",
+                    wait_seconds,
+                    self._consecutive_auth_failures,
+                )
+                raise ConfigEntryAuthFailed(
+                    f"Auth backoff active. Retry in {wait_seconds}s."
+                )
+
             _LOGGER.debug("Token invalid or expiring soon. Attempting recovery.")
-            auth_successful = False
             last_auth_error = None
 
             if self._refresh_token:
@@ -206,34 +233,30 @@ class DanalockApiClient:
                 try:
                     await self._refresh_access_token()
                     if self._access_token and self._token_expires_at and self._token_expires_at >= (current_time + 60):
-                        _LOGGER.debug("Token refresh successful. New access token is ready to be used.")
-                        auth_successful = True
+                        _LOGGER.debug("Token refresh successful.")
+                        self._consecutive_auth_failures = 0
+                        self._next_auth_attempt_at = 0.0
+                        return
                 except (DanalockApiAuthError, ConfigEntryAuthFailed) as err:
-                     _LOGGER.warning("Refresh token failed (%s). Attempting password auth.", err)
-                     last_auth_error = err
-                     self._access_token = self._refresh_token = self._pending_refresh_token = None
-                     self._token_expires_at = 0.0
+                    _LOGGER.warning("Refresh token failed (%s). Triggering re-authentication.", err)
+                    last_auth_error = err
+                    self._access_token = self._refresh_token = self._pending_refresh_token = None
+                    self._token_expires_at = 0.0
 
-            if not auth_successful and self._password:
-                _LOGGER.info("Attempting full authentication using stored password.")
-                try:
-                    await self.authenticate(self._username, self._password)
-                    if self._access_token and self._token_expires_at and self._token_expires_at >= (current_time + 60):
-                        _LOGGER.info("Password authentication successful.")
-                        auth_successful = True
-                        last_auth_error = None
-                except (DanalockApiAuthError, ConfigEntryAuthFailed) as err:
-                     _LOGGER.error("Password authentication failed: %s. Clearing stored password.", err)
-                     last_auth_error = err
-                     self._password = None
-                     await self._persist_updated_tokens()
-
-            if not auth_successful:
-                final_error_msg = "Authentication required. All recovery attempts failed."
-                _LOGGER.error(final_error_msg)
-                if self._entry:
-                    self._entry.async_start_reauth(self._hass)
-                raise ConfigEntryAuthFailed(final_error_msg) from last_auth_error
+            self._consecutive_auth_failures += 1
+            backoff = min(_BACKOFF_BASE ** self._consecutive_auth_failures, _BACKOFF_MAX)
+            self._next_auth_attempt_at = current_time + backoff
+            _LOGGER.error(
+                "Authentication required. Failure #%d. Next attempt allowed in %.0fs.",
+                self._consecutive_auth_failures,
+                backoff,
+            )
+            if self._entry:
+                self._entry.async_start_reauth(self._hass)
+            raise ConfigEntryAuthFailed(
+                f"Authentication required. Token refresh failed or no tokens available. "
+                f"Retry in {backoff:.0f}s."
+            ) from last_auth_error
 
 
     async def authenticate(self, username: str, password: str) -> Dict[str, Any]:
@@ -251,6 +274,8 @@ class DanalockApiClient:
             self._username = username
             self._password = password
             self._pending_refresh_token = None
+            self._consecutive_auth_failures = 0
+            self._next_auth_attempt_at = 0.0
             _LOGGER.info("Authentication successful. Persisting new tokens.")
             await self._persist_updated_tokens()
             return response
